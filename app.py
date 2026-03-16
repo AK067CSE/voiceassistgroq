@@ -1,0 +1,464 @@
+"""
+app.py  —  Voice Chat  (Streamlit + Deepgram STT/TTS + Groq)
+─────────────────────────────────────────────────────────────
+Flow per turn:
+  1. User records audio  →  Deepgram STT (nova-3)   →  transcript
+  2. Transcript          →  Groq llama3-70b-8192     →  reply text
+  3. Reply text          →  Deepgram TTS (aura-2)    →  wav audio
+  4. Play audio + show chat bubbles
+
+Run:
+  streamlit run app.py
+"""
+
+import os
+import uuid
+
+import streamlit as st
+from dotenv import load_dotenv
+from audio_recorder_streamlit import audio_recorder
+
+from deepgram import DeepgramClient
+from groq_ai import generate_response, clear_history
+
+load_dotenv()
+
+DG_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+OUTPUT_WAV  = "output.wav"
+
+# ── Deepgram voice options ────────────────────────────────────────────────────
+VOICES = {
+    "Asteria — Warm Female":   "aura-2-asteria-en",
+    "Luna — Soft Female":      "aura-2-luna-en",
+    "Stella — Upbeat Female":  "aura-2-stella-en",
+    "Athena — British Female": "aura-2-athena-en",
+    "Hera — Confident Female": "aura-2-hera-en",
+    "Orion — Deep Male":       "aura-2-orion-en",
+    "Arcas — Casual Male":     "aura-2-arcas-en",
+    "Perseus — Neutral Male":  "aura-2-perseus-en",
+    "Angus — Irish Male":      "aura-2-angus-en",
+    "Orpheus — Rich Male":     "aura-2-orpheus-en",
+    "Helios — Energetic Male": "aura-2-helios-en",
+    "Zeus — Bold Male":        "aura-2-zeus-en",
+}
+
+# ── Deepgram helpers ──────────────────────────────────────────────────────────
+
+def stt(audio_bytes: bytes) -> str:
+    """audio bytes → transcript via Deepgram nova-3"""
+    deepgram = DeepgramClient(api_key=DG_API_KEY)
+    response = deepgram.listen.v1.media.transcribe_file(
+        request=audio_bytes,
+        model="nova-3",
+        smart_format=True,
+        punctuate=True,
+    )
+    try:
+        return response.results.channels[0].alternatives[0].transcript.strip()
+    except Exception:
+        return ""
+
+
+def TTS(text: str, voice_model: str) -> str:
+    """text → wav file via Deepgram aura-2, returns filename"""
+    try:
+        deepgram = DeepgramClient(api_key=DG_API_KEY)
+        response = deepgram.speak.v1.audio.generate(
+            text=text,
+            model=voice_model,
+            encoding="linear16",
+            container="wav"
+        )
+        
+        # Debug: print response type
+        st.write(f"Response type: {type(response)}")
+        
+        # Save the audio file
+        with open(OUTPUT_WAV, "wb") as audio_file:
+            if hasattr(response, 'stream'):
+                if hasattr(response.stream, 'getvalue'):
+                    audio_data = response.stream.getvalue()
+                elif hasattr(response.stream, 'read'):
+                    audio_data = response.stream.read()
+                else:
+                    audio_data = response.stream
+                audio_file.write(audio_data)
+            elif isinstance(response, (bytes, bytearray)):
+                audio_file.write(response)
+            else:
+                # Try to iterate if it's a generator
+                audio_data = b"".join(chunk for chunk in response if chunk)
+                audio_file.write(audio_data)
+        
+        # Verify file was created
+        if os.path.exists(OUTPUT_WAV):
+            st.write(f"Audio file created: {OUTPUT_WAV} ({os.path.getsize(OUTPUT_WAV)} bytes)")
+            return OUTPUT_WAV
+        else:
+            st.error("Audio file was not created")
+            return ""
+            
+    except Exception as e:
+        st.error(f"TTS error: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+        return ""
+
+
+# ── Session state ─────────────────────────────────────────────────────────────
+if "session_id"    not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+if "chat_history"  not in st.session_state:
+    st.session_state.chat_history = []
+if "last_audio_id" not in st.session_state:
+    st.session_state.last_audio_id = None
+
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Talking Assistant",
+    page_icon="🎙️",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Clash+Display:wght@700&family=Fraunces:ital,wght@0,900;1,700&family=DM+Sans:wght@400;500&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'DM Sans', sans-serif;
+    background: #080b10;
+    color: #d8dff0;
+}
+
+.main .block-container {
+    max-width: 720px;
+    padding-top: 1.5rem;
+    padding-bottom: 7rem;
+}
+
+/* ── Header ── */
+.va-header {
+    text-align: center;
+    padding: 1.8rem 0 1rem;
+}
+.va-title {
+    font-family: 'Fraunces', serif;
+    font-size: 2.6rem;
+    font-weight: 900;
+    letter-spacing: -1px;
+    color: #f0f4ff;
+    line-height: 1.1;
+}
+.va-title span {
+    background: linear-gradient(120deg, #f97316, #ec4899);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.va-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    color: #3a4570;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-top: 0.4rem;
+}
+.va-line {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #1e2540, transparent);
+    margin: 1.2rem 0 1.6rem;
+}
+
+/* ── Chat bubbles ── */
+.brow { display: flex; margin-bottom: 0.9rem; align-items: flex-end; gap: 10px; }
+.brow.user  { flex-direction: row-reverse; }
+.brow.agent { flex-direction: row; }
+
+.av {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; flex-shrink: 0;
+}
+.av.user  { background: #1a2840; }
+.av.agent { background: #200e1a; }
+
+.bub {
+    max-width: 72%; border-radius: 16px;
+    padding: 11px 15px; font-size: 0.88rem; line-height: 1.65;
+    word-break: break-word;
+}
+.bub.user  {
+    background: #152236;
+    border-bottom-right-radius: 4px;
+    color: #93c5fd;
+}
+.bub.agent {
+    background: #1a0e1a;
+    border-bottom-left-radius: 4px;
+    color: #f9a8d4;
+    border: 1px solid #2d1130;
+}
+
+/* ── Empty state ── */
+.empty-hint {
+    text-align: center; color: #252d48;
+    font-size: 0.82rem; font-family: 'JetBrains Mono', monospace;
+    margin-top: 3.5rem; letter-spacing: 0.5px;
+}
+
+/* ── Recorder anchor ── */
+.rec-anchor {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    padding: 1rem 0 1.2rem;
+    background: linear-gradient(to top, #080b10 60%, transparent);
+    display: flex; flex-direction: column;
+    align-items: center; gap: 6px; z-index: 99;
+}
+.rec-hint {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.62rem; color: #252d48;
+    letter-spacing: 1.5px; text-transform: uppercase;
+}
+
+/* Groq badge */
+.groq-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: rgba(249,115,22,.1); color: #fb923c;
+    border: 1px solid rgba(249,115,22,.2);
+    border-radius: 20px; padding: 3px 12px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.65rem;
+}
+.dg-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: rgba(236,72,153,.1); color: #f472b6;
+    border: 1px solid rgba(236,72,153,.2);
+    border-radius: 20px; padding: 3px 12px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.65rem;
+}
+
+/* audio player */
+audio {
+    width: 100%; height: 34px; margin-top: 8px; border-radius: 8px;
+    filter: invert(0.9) sepia(0.4) hue-rotate(290deg);
+}
+
+/* Microphone/recorder button fixes */
+[data-testid="stAudioRecorder"] > div > button * {
+    background-color: transparent !important;
+    color: #f97316 !important;
+}
+
+[data-testid="stAudioRecorder"] button,
+[data-testid="stAudioRecorder"] > div > button {
+    background-color: #1a2540 !important;
+    border-color: #2a3550 !important;
+    color: #f97316 !important;
+}
+
+[data-testid="stAudioRecorder"] button:hover,
+[data-testid="stAudioRecorder"] > div > button:hover {
+    background-color: #2a3550 !important;
+    border-color: #3a4560 !important;
+    color: #fb923c !important;
+}
+
+[data-testid="stAudioRecorder"] button:active,
+[data-testid="stAudioRecorder"] button:focus,
+[data-testid="stAudioRecorder"] > div > button:active,
+[data-testid="stAudioRecorder"] > div > button:focus {
+    background-color: #1a2540 !important;
+    border-color: #f97316 !important;
+    color: #f97316 !important;
+    box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.3) !important;
+}
+
+/* Force override all white backgrounds */
+button[aria-label*="record"],
+button[title*="record"],
+button[data-testid*="record"] {
+    background-color: #1a2540 !important;
+    color: #f97316 !important;
+}
+
+/* Most aggressive override for mic button */
+.stAudioRecorder button,
+.stAudioRecorder > div > button,
+.stAudioRecorder div button,
+[data-testid="stAudioRecorder"] button,
+[data-testid="stAudioRecorder"] div button,
+div[data-testid="stAudioRecorder"] button {
+    background-color: #1a2540 !important;
+    border: 1px solid #2a3550 !important;
+    color: #f97316 !important;
+    border-radius: 8px !important;
+}
+
+.stAudioRecorder button:hover,
+.stAudioRecorder > div > button:hover,
+.stAudioRecorder div button:hover,
+[data-testid="stAudioRecorder"] button:hover,
+[data-testid="stAudioRecorder"] div button:hover,
+div[data-testid="stAudioRecorder"] button:hover {
+    background-color: #2a3550 !important;
+    border-color: #3a4560 !important;
+    color: #fb923c !important;
+}
+
+/* Override any SVG or icon colors */
+.stAudioRecorder button svg,
+.stAudioRecorder > div > button svg,
+.stAudioRecorder div button svg,
+[data-testid="stAudioRecorder"] button svg,
+[data-testid="stAudioRecorder"] div button svg,
+div[data-testid="stAudioRecorder"] button svg {
+    fill: #f97316 !important;
+    color: #f97316 !important;
+}
+
+/* sidebar */
+section[data-testid="stSidebar"] {
+    background: #0d0f18;
+    border-right: 1px solid #14192b;
+}
+section[data-testid="stSidebar"] .block-container { padding-top: 1.8rem; }
+
+.stSpinner > div { border-top-color: #f97316 !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### ⚙️ Settings")
+    st.markdown("---")
+
+    voice_name = st.selectbox(
+        "Deepgram Voice",
+        options=list(VOICES.keys()),
+        index=0,
+    )
+    voice_model = VOICES[voice_name]
+
+    st.markdown("---")
+    st.markdown(
+        f"""
+        <div style='font-family:JetBrains Mono,monospace;font-size:0.68rem;
+                    color:#3a4570;line-height:2.2;'>
+        STT &nbsp;&nbsp;nova-3<br>
+        LLM &nbsp;&nbsp;llama3-70b<br>
+        TTS &nbsp;&nbsp;aura-2<br>
+        Voice &nbsp;{voice_model}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+    if st.button("🗑 Clear chat", use_container_width=True):
+        st.session_state.chat_history = []
+        clear_history(st.session_state.session_id)
+        st.session_state.session_id = str(uuid.uuid4())
+        st.rerun()
+
+# ── Header ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="va-header">
+  <div class="va-title">Talking Assistant <span>🎙️</span></div>
+  <div class="va-sub">Groq · Deepgram · nova-3 · aura-2</div>
+</div>
+<div class="va-line"></div>
+""", unsafe_allow_html=True)
+
+# Badges row
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    st.markdown('<div class="groq-badge">⚡ Groq llama3-70b</div>', unsafe_allow_html=True)
+with col2:
+    st.markdown('<div class="dg-badge">🎤 Deepgram nova-3</div>', unsafe_allow_html=True)
+with col3:
+    st.markdown('<div class="dg-badge">🔊 Deepgram aura-2</div>', unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ── Chat history ──────────────────────────────────────────────────────────────
+if not st.session_state.chat_history:
+    st.markdown(
+        '<p class="empty-hint">Press the mic button below to start talking</p>',
+        unsafe_allow_html=True,
+    )
+
+for turn in st.session_state.chat_history:
+    role  = turn["role"]
+    text  = turn["text"]
+    audio = turn.get("audio_file")
+    avatar = "🧑" if role == "user" else "🤖"
+
+    st.markdown(f"""
+    <div class="brow {role}">
+      <div class="av {role}">{avatar}</div>
+      <div class="bub {role}">{text}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if role == "agent" and audio and os.path.exists(audio):
+        with open(audio, "rb") as f:
+            st.audio(f.read(), format="audio/wav")
+
+# ── Recorder (pinned bottom) ──────────────────────────────────────────────────
+st.markdown('<div class="rec-anchor">', unsafe_allow_html=True)
+
+audio_bytes = audio_recorder(
+    text="",
+    recording_color="#f97316",
+    neutral_color="#1a2540",
+    icon_name="microphone",
+    icon_size="2x",
+    pause_threshold=2.5,
+    sample_rate=16000,
+    key="recorder",
+)
+
+st.markdown(
+    '<div class="rec-hint">click to record · silence stops automatically</div>',
+    unsafe_allow_html=True,
+)
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ── Process new recording ─────────────────────────────────────────────────────
+if audio_bytes:
+    audio_id = hash(audio_bytes)
+    if audio_id != st.session_state.last_audio_id:
+        st.session_state.last_audio_id = audio_id
+
+        # Step 1 — STT
+        with st.spinner("Transcribing…"):
+            transcript = stt(audio_bytes)
+
+        if not transcript:
+            st.warning("Couldn't catch that — please try again.")
+            st.stop()
+
+        st.session_state.chat_history.append({
+            "role":  "user",
+            "text":  transcript,
+        })
+
+        # Step 2 — Groq LLM
+        with st.spinner("Thinking…"):
+            reply = generate_response(transcript, st.session_state.session_id)
+
+        if not reply:
+            reply = "Sorry, I had trouble with that. Please try again."
+
+        # Step 3 — TTS
+        with st.spinner("Speaking…"):
+            wav_file = TTS(reply, voice_model)
+
+        st.session_state.chat_history.append({
+            "role":       "agent",
+            "text":       reply,
+            "audio_file": wav_file,
+        })
+
+        st.rerun()
