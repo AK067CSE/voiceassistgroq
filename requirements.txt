@@ -1,0 +1,5 @@
+streamlit
+audio-recorder-streamlit
+deepgram-sdk
+groq
+python-dotenv
