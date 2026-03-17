@@ -4,8 +4,8 @@ groq_ai.py
 Groq LLM — generates conversational responses spoken aloud via TTS.
 Keeps a running message history so the conversation has memory.
 """
-
 import os
+
 try:
     import streamlit as st
     _api_key = st.secrets.get("GROQ_API_KEY")
@@ -24,7 +24,6 @@ _history: dict[str, list] = {}
 
 SYSTEM_PROMPT = """You are a friendly voice assistant. Your replies will be spoken aloud
 so always write for the ear — short, natural, conversational.
-
 Rules:
 - Maximum 2 sentences per reply
 - Use contractions and casual language
@@ -36,7 +35,7 @@ Rules:
 
 def generate_response(prompt: str, session_id: str = "default") -> str:
     """
-    Send prompt to Groq (llama3-70b-8192) and return the text reply.
+    Send prompt to Groq (llama-3.1-8b-instant) and return the text reply.
     Maintains conversation history per session_id.
     """
     if session_id not in _history:
@@ -58,9 +57,7 @@ def generate_response(prompt: str, session_id: str = "default") -> str:
     for chunk in completion:
         response += (chunk.choices[0].delta.content or "")
 
-    # Store assistant reply in history
     _history[session_id].append({"role": "assistant", "content": response})
-
     return response.strip()
 
 
