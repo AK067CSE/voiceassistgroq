@@ -24,7 +24,6 @@ from groq_ai import generate_response, clear_history
 load_dotenv()
 
 DG_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
-OUTPUT_WAV  = "output.wav"
 
 # ── Deepgram voice options ────────────────────────────────────────────────────
 VOICES = {
@@ -60,7 +59,9 @@ def stt(audio_bytes: bytes) -> str:
 
 
 def TTS(text: str, voice_model: str) -> str:
-    """text → wav file via Deepgram aura-2, returns filename"""
+    """text → wav file via Deepgram aura-2, returns unique filename"""
+    # Use a unique filename each time so audio files never overwrite each other
+    output_wav = f"output_{uuid.uuid4().hex[:8]}.wav"
     try:
         deepgram = DeepgramClient(api_key=DG_API_KEY)
         response = deepgram.speak.v1.audio.generate(
@@ -69,16 +70,12 @@ def TTS(text: str, voice_model: str) -> str:
             encoding="linear16",
             container="wav"
         )
-        
-        # Debug: print response type
-        st.write(f"Response type: {type(response)}")
-        
-        # Save the audio file
-        with open(OUTPUT_WAV, "wb") as audio_file:
-            if hasattr(response, 'stream'):
-                if hasattr(response.stream, 'getvalue'):
+
+        with open(output_wav, "wb") as audio_file:
+            if hasattr(response, "stream"):
+                if hasattr(response.stream, "getvalue"):
                     audio_data = response.stream.getvalue()
-                elif hasattr(response.stream, 'read'):
+                elif hasattr(response.stream, "read"):
                     audio_data = response.stream.read()
                 else:
                     audio_data = response.stream
@@ -86,18 +83,15 @@ def TTS(text: str, voice_model: str) -> str:
             elif isinstance(response, (bytes, bytearray)):
                 audio_file.write(response)
             else:
-                # Try to iterate if it's a generator
                 audio_data = b"".join(chunk for chunk in response if chunk)
                 audio_file.write(audio_data)
-        
-        # Verify file was created
-        if os.path.exists(OUTPUT_WAV):
-            st.write(f"Audio file created: {OUTPUT_WAV} ({os.path.getsize(OUTPUT_WAV)} bytes)")
-            return OUTPUT_WAV
+
+        if os.path.exists(output_wav) and os.path.getsize(output_wav) > 0:
+            return output_wav
         else:
-            st.error("Audio file was not created")
+            st.error("Audio file was not created or is empty.")
             return ""
-            
+
     except Exception as e:
         st.error(f"TTS error: {e}")
         import traceback
@@ -106,12 +100,15 @@ def TTS(text: str, voice_model: str) -> str:
 
 
 # ── Session state ─────────────────────────────────────────────────────────────
-if "session_id"    not in st.session_state:
+if "session_id"      not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
-if "chat_history"  not in st.session_state:
+if "chat_history"    not in st.session_state:
     st.session_state.chat_history = []
-if "last_audio_id" not in st.session_state:
-    st.session_state.last_audio_id = None
+# KEY FIX: a counter that increments after every turn to reset the recorder widget
+if "recorder_turn"   not in st.session_state:
+    st.session_state.recorder_turn = 0
+if "processing"      not in st.session_state:
+    st.session_state.processing = False
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -249,70 +246,20 @@ audio {
     background-color: transparent !important;
     color: #f97316 !important;
 }
-
 [data-testid="stAudioRecorder"] button,
 [data-testid="stAudioRecorder"] > div > button {
     background-color: #1a2540 !important;
     border-color: #2a3550 !important;
     color: #f97316 !important;
 }
-
 [data-testid="stAudioRecorder"] button:hover,
 [data-testid="stAudioRecorder"] > div > button:hover {
     background-color: #2a3550 !important;
     border-color: #3a4560 !important;
     color: #fb923c !important;
 }
-
-[data-testid="stAudioRecorder"] button:active,
-[data-testid="stAudioRecorder"] button:focus,
-[data-testid="stAudioRecorder"] > div > button:active,
-[data-testid="stAudioRecorder"] > div > button:focus {
-    background-color: #1a2540 !important;
-    border-color: #f97316 !important;
-    color: #f97316 !important;
-    box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.3) !important;
-}
-
-/* Force override all white backgrounds */
-button[aria-label*="record"],
-button[title*="record"],
-button[data-testid*="record"] {
-    background-color: #1a2540 !important;
-    color: #f97316 !important;
-}
-
-/* Most aggressive override for mic button */
-.stAudioRecorder button,
-.stAudioRecorder > div > button,
-.stAudioRecorder div button,
-[data-testid="stAudioRecorder"] button,
-[data-testid="stAudioRecorder"] div button,
-div[data-testid="stAudioRecorder"] button {
-    background-color: #1a2540 !important;
-    border: 1px solid #2a3550 !important;
-    color: #f97316 !important;
-    border-radius: 8px !important;
-}
-
-.stAudioRecorder button:hover,
-.stAudioRecorder > div > button:hover,
-.stAudioRecorder div button:hover,
-[data-testid="stAudioRecorder"] button:hover,
-[data-testid="stAudioRecorder"] div button:hover,
-div[data-testid="stAudioRecorder"] button:hover {
-    background-color: #2a3550 !important;
-    border-color: #3a4560 !important;
-    color: #fb923c !important;
-}
-
-/* Override any SVG or icon colors */
-.stAudioRecorder button svg,
-.stAudioRecorder > div > button svg,
-.stAudioRecorder div button svg,
 [data-testid="stAudioRecorder"] button svg,
-[data-testid="stAudioRecorder"] div button svg,
-div[data-testid="stAudioRecorder"] button svg {
+[data-testid="stAudioRecorder"] div button svg {
     fill: #f97316 !important;
     color: #f97316 !important;
 }
@@ -359,6 +306,7 @@ with st.sidebar:
         st.session_state.chat_history = []
         clear_history(st.session_state.session_id)
         st.session_state.session_id = str(uuid.uuid4())
+        st.session_state.recorder_turn = 0
         st.rerun()
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -370,7 +318,6 @@ st.markdown("""
 <div class="va-line"></div>
 """, unsafe_allow_html=True)
 
-# Badges row
 col1, col2, col3 = st.columns([1, 1, 1])
 with col1:
     st.markdown('<div class="groq-badge">⚡ Groq llama3-70b</div>', unsafe_allow_html=True)
@@ -389,9 +336,9 @@ if not st.session_state.chat_history:
     )
 
 for turn in st.session_state.chat_history:
-    role  = turn["role"]
-    text  = turn["text"]
-    audio = turn.get("audio_file")
+    role   = turn["role"]
+    text   = turn["text"]
+    audio  = turn.get("audio_file")
     avatar = "🧑" if role == "user" else "🤖"
 
     st.markdown(f"""
@@ -406,6 +353,11 @@ for turn in st.session_state.chat_history:
             st.audio(f.read(), format="audio/wav")
 
 # ── Recorder (pinned bottom) ──────────────────────────────────────────────────
+# KEY FIX: use a turn-based key so the widget fully resets after each recording.
+# When the key changes, Streamlit treats it as a brand-new component → returns None
+# → user must press mic again for the next turn. No stale bytes, no stuck state.
+recorder_key = f"recorder_{st.session_state.recorder_turn}"
+
 st.markdown('<div class="rec-anchor">', unsafe_allow_html=True)
 
 audio_bytes = audio_recorder(
@@ -416,49 +368,49 @@ audio_bytes = audio_recorder(
     icon_size="2x",
     pause_threshold=2.5,
     sample_rate=16000,
-    key="recorder",
+    key=recorder_key,
 )
 
-st.markdown(
-    '<div class="rec-hint">click to record · silence stops automatically</div>',
-    unsafe_allow_html=True,
-)
+hint = "processing… please wait" if st.session_state.processing else "click to record · silence stops automatically"
+st.markdown(f'<div class="rec-hint">{hint}</div>', unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ── Process new recording ─────────────────────────────────────────────────────
-if audio_bytes:
-    audio_id = hash(audio_bytes)
-    if audio_id != st.session_state.last_audio_id:
-        st.session_state.last_audio_id = audio_id
+if audio_bytes and not st.session_state.processing:
+    st.session_state.processing = True
 
-        # Step 1 — STT
-        with st.spinner("Transcribing…"):
-            transcript = stt(audio_bytes)
+    # Step 1 — STT
+    with st.spinner("Transcribing…"):
+        transcript = stt(audio_bytes)
 
-        if not transcript:
-            st.warning("Couldn't catch that — please try again.")
-            st.stop()
-
-        st.session_state.chat_history.append({
-            "role":  "user",
-            "text":  transcript,
-        })
-
-        # Step 2 — Groq LLM
-        with st.spinner("Thinking…"):
-            reply = generate_response(transcript, st.session_state.session_id)
-
-        if not reply:
-            reply = "Sorry, I had trouble with that. Please try again."
-
-        # Step 3 — TTS
-        with st.spinner("Speaking…"):
-            wav_file = TTS(reply, voice_model)
-
-        st.session_state.chat_history.append({
-            "role":       "agent",
-            "text":       reply,
-            "audio_file": wav_file,
-        })
-
+    if not transcript:
+        st.warning("Couldn't catch that — please try again.")
+        st.session_state.processing = False
+        # Bump key so the recorder resets even on failure
+        st.session_state.recorder_turn += 1
         st.rerun()
+
+    st.session_state.chat_history.append({"role": "user", "text": transcript})
+
+    # Step 2 — Groq LLM
+    with st.spinner("Thinking…"):
+        reply = generate_response(transcript, st.session_state.session_id)
+
+    if not reply:
+        reply = "Sorry, I had trouble with that. Please try again."
+
+    # Step 3 — TTS
+    with st.spinner("Speaking…"):
+        wav_file = TTS(reply, voice_model)
+
+    st.session_state.chat_history.append({
+        "role":       "agent",
+        "text":       reply,
+        "audio_file": wav_file,
+    })
+
+    # KEY FIX: bump the turn counter BEFORE rerun so the recorder key changes
+    # and Streamlit mounts a fresh component → ready for next voice input immediately
+    st.session_state.recorder_turn += 1
+    st.session_state.processing = False
+    st.rerun()
