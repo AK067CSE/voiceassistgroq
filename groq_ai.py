@@ -1,25 +1,21 @@
 """
 groq_ai.py
 ──────────
-Groq LLM — generates conversational responses spoken aloud via TTS.
+Groq LLM — generates conversational responses using llama-3.1-8b-instant.
 Keeps a running message history so the conversation has memory.
 """
 import os
-
-try:
-    import streamlit as st
-    _api_key = st.secrets.get("GROQ_API_KEY")
-except ImportError:
-    _api_key = None
-
-from groq import Groq
+from groq import Groq, GroqError
 from dotenv import load_dotenv
 
 load_dotenv()
 
-_client = Groq(api_key=_api_key or os.getenv("GROQ_API_KEY", ""))
+# ── API Key Validation ────────────────────────────────────────────────────────
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+if not GROQ_API_KEY:
+    raise ValueError("❌ GROQ_API_KEY not found in environment variables or .env file")
 
-# In-memory conversation history  { session_id: [messages] }
+_client = Groq(api_key=GROQ_API_KEY)
 _history: dict[str, list] = {}
 
 SYSTEM_PROMPT = """You are a friendly voice assistant. Your replies will be spoken aloud
@@ -32,6 +28,9 @@ Rules:
 - Sound warm and human, not robotic
 """
 
+# ✅ Model name — confirmed
+MODEL_NAME = "llama-3.1-8b-instant"
+
 
 def generate_response(prompt: str, session_id: str = "default") -> str:
     """
@@ -43,22 +42,27 @@ def generate_response(prompt: str, session_id: str = "default") -> str:
 
     _history[session_id].append({"role": "user", "content": prompt})
 
-    completion = _client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=_history[session_id],
-        temperature=1,
-        max_tokens=1024,
-        top_p=1,
-        stream=True,
-        stop=None,
-    )
-
-    response = ""
-    for chunk in completion:
-        response += (chunk.choices[0].delta.content or "")
-
-    _history[session_id].append({"role": "assistant", "content": response})
-    return response.strip()
+    try:
+        completion = _client.chat.completions.create(
+            model=MODEL_NAME,  # ✅ Uses llama-3.1-8b-instant
+            messages=_history[session_id],
+            temperature=1,
+            max_tokens=1024,
+            top_p=1,
+            stream=True,
+        )
+        response = ""
+        for chunk in completion:
+            if chunk.choices[0].delta.content:
+                response += chunk.choices[0].delta.content
+        _history[session_id].append({"role": "assistant", "content": response})
+        return response.strip()
+    except GroqError as e:
+        print(f"❌ Groq API Error: {e}")
+        return ""
+    except Exception as e:
+        print(f"❌ Groq Error: {type(e).__name__} — {e}")
+        return ""
 
 
 def clear_history(session_id: str = "default"):
