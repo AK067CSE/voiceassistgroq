@@ -3,27 +3,9 @@ groq_ai.py
 ──────────
 Groq LLM — generates conversational responses using llama-3.1-8b-instant.
 """
-import os
 from groq import Groq
 
-# ── API Key Loading (Works with Streamlit Cloud secrets OR .env) ─────────────
-try:
-    import streamlit as st
-    # Try Streamlit secrets first (for Streamlit Cloud)
-    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
-except Exception:
-    # Fallback to environment variables (for local development)
-    from dotenv import load_dotenv
-    load_dotenv()
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-
-# Strip whitespace and validate
-GROQ_API_KEY = str(GROQ_API_KEY).strip()
-
-if not GROQ_API_KEY:
-    raise ValueError("❌ GROQ_API_KEY not found in secrets.toml or .env file")
-
-_client = Groq(api_key=GROQ_API_KEY)
+# ✅ No module-level secret access - API key passed as parameter
 _history: dict[str, list] = {}
 
 SYSTEM_PROMPT = """You are a friendly voice assistant. Your replies will be spoken aloud
@@ -39,14 +21,24 @@ Rules:
 MODEL_NAME = "llama-3.1-8b-instant"
 
 
-def generate_response(prompt: str, session_id: str = "default") -> str:
+def get_groq_client(api_key: str) -> Groq:
+    """Create Groq client with provided API key."""
+    return Groq(api_key=api_key)
+
+
+def generate_response(prompt: str, session_id: str, api_key: str) -> str:
+    """
+    Send prompt to Groq and return the text reply.
+    API key is passed as parameter (not loaded at module level).
+    """
     if session_id not in _history:
         _history[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     _history[session_id].append({"role": "user", "content": prompt})
 
     try:
-        completion = _client.chat.completions.create(
+        client = get_groq_client(api_key)
+        completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=_history[session_id],
             temperature=1,
@@ -66,4 +58,5 @@ def generate_response(prompt: str, session_id: str = "default") -> str:
 
 
 def clear_history(session_id: str = "default"):
+    """Wipe conversation memory for a session."""
     _history.pop(session_id, None)
