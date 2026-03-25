@@ -1,6 +1,8 @@
 """
 app.py  —  Voice Chat  (Streamlit + Deepgram STT/TTS + Groq)
 ─────────────────────────────────────────────────────────────
+Uses raw HTTP requests for Deepgram — zero SDK import issues.
+
 Flow per turn:
   1. User records audio  →  Deepgram STT (nova-3)         →  transcript
   2. Transcript          →  Groq llama-3.1-8b-instant     →  reply text
@@ -13,19 +15,10 @@ Run:
 
 import os
 import uuid
+import requests
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
-from deepgram import DeepgramClient, PrerecordedOptions, SpeakOptions  # noqa: F401
 from groq_ai import generate_response, clear_history
-
-# ── Resolve correct SpeakOptions class across SDK versions ───────────────────
-try:
-    from deepgram import SpeakOptions as _SpeakOpts  # SDK v3.2–3.x
-except ImportError:
-    try:
-        from deepgram import SpeakRESTOptions as _SpeakOpts  # SDK v3.3+
-    except ImportError:
-        _SpeakOpts = None  # fallback: pass dict directly
 
 # ── Page config (MUST be first Streamlit command) ─────────────────────────────
 st.set_page_config(
@@ -35,9 +28,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── API Key Loading (AFTER st.set_page_config) ────────────────────────────────
+# ── API Key Loading ───────────────────────────────────────────────────────────
 def load_api_keys():
-    """Load API keys from Streamlit secrets or environment variables."""
     try:
         dg_key   = st.secrets.get("DEEPGRAM_API_KEY", "")
         groq_key = st.secrets.get("GROQ_API_KEY", "")
@@ -73,28 +65,29 @@ VOICES = {
     "Zeus — Bold Male":        "aura-2-zeus-en",
 }
 
-# ── Deepgram helpers ──────────────────────────────────────────────────────────
+# ── Deepgram helpers (pure HTTP — no SDK imports needed) ─────────────────────
+
+DG_STT_URL = "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true"
+DG_TTS_URL = "https://api.deepgram.com/v1/speak"
+
 
 def stt(audio_bytes: bytes) -> str:
-    """audio bytes → transcript via Deepgram nova-3 (SDK v3 compatible)"""
+    """audio bytes → transcript via Deepgram nova-3 REST API"""
     try:
-        deepgram = DeepgramClient(api_key=DG_API_KEY)
-        payload = {"buffer": audio_bytes}
-        options = PrerecordedOptions(
-            model="nova-3",
-            smart_format=True,
-            punctuate=True,
+        headers = {
+            "Authorization": f"Token {DG_API_KEY}",
+            "Content-Type": "audio/wav",
+        }
+        resp = requests.post(DG_STT_URL, headers=headers, data=audio_bytes, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()
+        transcript = (
+            result["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
         )
-
-        # Try newer 'listen.rest' path first (SDK v3.3+), fall back to 'listen.prerecorded'
-        try:
-            response = deepgram.listen.rest.v("1").transcribe_file(payload, options)
-        except AttributeError:
-            response = deepgram.listen.prerecorded.v("1").transcribe_file(payload, options)
-
-        transcript = response.results.channels[0].alternatives[0].transcript.strip()
         return transcript
-
+    except requests.HTTPError as e:
+        st.error(f"🔇 STT HTTP Error {e.response.status_code}: {e.response.text}")
+        return ""
     except Exception as e:
         st.error(f"🔇 STT Error: {type(e).__name__} — {e}")
         import traceback
@@ -103,28 +96,38 @@ def stt(audio_bytes: bytes) -> str:
 
 
 def tts(text: str, voice_model: str) -> str:
-    """text → wav file via Deepgram aura-2 (SDK v3 compatible), returns unique filename"""
+    """text → wav file via Deepgram aura-2 REST API, returns filename"""
     output_wav = f"output_{uuid.uuid4().hex[:8]}.wav"
     try:
-        deepgram = DeepgramClient(api_key=DG_API_KEY)
+        params = {
+            "model": voice_model,
+            "encoding": "linear16",
+            "container": "wav",
+        }
+        headers = {
+            "Authorization": f"Token {DG_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        resp = requests.post(
+            DG_TTS_URL,
+            params=params,
+            headers=headers,
+            json={"text": text},
+            timeout=30,
+        )
+        resp.raise_for_status()
 
-        speak_payload = {"text": text}
-        speak_options = {"model": voice_model, "encoding": "linear16", "container": "wav"}
-
-        # Build options object if available, else pass raw dict
-        if _SpeakOpts is not None:
-            opts_obj = _SpeakOpts(**speak_options)
-        else:
-            opts_obj = speak_options
-
-        response = deepgram.speak.v("1").save(output_wav, speak_payload, opts_obj)
+        with open(output_wav, "wb") as f:
+            f.write(resp.content)
 
         if os.path.exists(output_wav) and os.path.getsize(output_wav) > 0:
             return output_wav
         else:
             st.error("🔊 Audio file was not created or is empty.")
             return ""
-
+    except requests.HTTPError as e:
+        st.error(f"🔊 TTS HTTP Error {e.response.status_code}: {e.response.text}")
+        return ""
     except Exception as e:
         st.error(f"🔊 TTS Error: {type(e).__name__} — {e}")
         import traceback
@@ -154,49 +157,35 @@ html, body, [class*="css"] {
     background: #080b10;
     color: #d8dff0;
 }
-
 .main .block-container {
     max-width: 720px;
     padding-top: 1.5rem;
     padding-bottom: 7rem;
 }
-
-.va-header {
-    text-align: center;
-    padding: 1.8rem 0 1rem;
-}
+.va-header { text-align: center; padding: 1.8rem 0 1rem; }
 .va-title {
     font-family: 'Fraunces', serif;
-    font-size: 2.6rem;
-    font-weight: 900;
-    letter-spacing: -1px;
-    color: #f0f4ff;
-    line-height: 1.1;
+    font-size: 2.6rem; font-weight: 900;
+    letter-spacing: -1px; color: #f0f4ff; line-height: 1.1;
 }
 .va-title span {
     background: linear-gradient(120deg, #f97316, #ec4899);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     background-clip: text;
 }
 .va-sub {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 0.68rem;
-    color: #3a4570;
-    letter-spacing: 2.5px;
-    text-transform: uppercase;
-    margin-top: 0.4rem;
+    font-size: 0.68rem; color: #3a4570;
+    letter-spacing: 2.5px; text-transform: uppercase; margin-top: 0.4rem;
 }
 .va-line {
     height: 1px;
     background: linear-gradient(90deg, transparent, #1e2540, transparent);
     margin: 1.2rem 0 1.6rem;
 }
-
 .brow { display: flex; margin-bottom: 0.9rem; align-items: flex-end; gap: 10px; }
 .brow.user  { flex-direction: row-reverse; }
 .brow.agent { flex-direction: row; }
-
 .av {
     width: 32px; height: 32px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
@@ -204,30 +193,18 @@ html, body, [class*="css"] {
 }
 .av.user  { background: #1a2840; }
 .av.agent { background: #200e1a; }
-
 .bub {
     max-width: 72%; border-radius: 16px;
     padding: 11px 15px; font-size: 0.88rem; line-height: 1.65;
     word-break: break-word;
 }
-.bub.user  {
-    background: #152236;
-    border-bottom-right-radius: 4px;
-    color: #93c5fd;
-}
-.bub.agent {
-    background: #1a0e1a;
-    border-bottom-left-radius: 4px;
-    color: #f9a8d4;
-    border: 1px solid #2d1130;
-}
-
+.bub.user  { background: #152236; border-bottom-right-radius: 4px; color: #93c5fd; }
+.bub.agent { background: #1a0e1a; border-bottom-left-radius: 4px; color: #f9a8d4; border: 1px solid #2d1130; }
 .empty-hint {
     text-align: center; color: #252d48;
     font-size: 0.82rem; font-family: 'JetBrains Mono', monospace;
     margin-top: 3.5rem; letter-spacing: 0.5px;
 }
-
 .rec-anchor {
     position: fixed; bottom: 0; left: 0; right: 0;
     padding: 1rem 0 1.2rem;
@@ -240,7 +217,6 @@ html, body, [class*="css"] {
     font-size: 0.62rem; color: #252d48;
     letter-spacing: 1.5px; text-transform: uppercase;
 }
-
 .groq-badge {
     display: inline-flex; align-items: center; gap: 5px;
     background: rgba(249,115,22,.1); color: #fb923c;
@@ -255,18 +231,14 @@ html, body, [class*="css"] {
     border-radius: 20px; padding: 3px 12px;
     font-family: 'JetBrains Mono', monospace; font-size: 0.65rem;
 }
-
 audio {
     width: 100%; height: 34px; margin-top: 8px; border-radius: 8px;
     filter: invert(0.9) sepia(0.4) hue-rotate(290deg);
 }
-
 section[data-testid="stSidebar"] {
-    background: #0d0f18;
-    border-right: 1px solid #14192b;
+    background: #0d0f18; border-right: 1px solid #14192b;
 }
 section[data-testid="stSidebar"] .block-container { padding-top: 1.8rem; }
-
 .stSpinner > div { border-top-color: #f97316 !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -370,7 +342,6 @@ st.markdown(f'<div class="rec-hint">{hint}</div>', unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ── Process new recording ─────────────────────────────────────────────────────
-# Guard: only process if audio is new (different size) and large enough to be real speech
 MIN_AUDIO_BYTES = 1000  # ignore tiny/empty buffers
 
 if (
