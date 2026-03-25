@@ -18,27 +18,38 @@ from audio_recorder_streamlit import audio_recorder
 from deepgram import DeepgramClient
 from groq_ai import generate_response, clear_history
 
-# ── API Key Loading (Works with Streamlit Cloud secrets OR .env) ─────────────
-try:
-    # Try Streamlit secrets first (for Streamlit Cloud)
-    DG_API_KEY = st.secrets.get("DEEPGRAM_API_KEY", "")
-    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
-except Exception:
-    # Fallback to environment variables (for local development)
-    from dotenv import load_dotenv
-    load_dotenv()
-    DG_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+# ── Page config (MUST be first Streamlit command) ─────────────────────────────
+st.set_page_config(
+    page_title="Talking Assistant",
+    page_icon="🎙️",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
 
-# Strip whitespace and validate
-DG_API_KEY = str(DG_API_KEY).strip()
-GROQ_API_KEY = str(GROQ_API_KEY).strip()
+# ── API Key Loading (AFTER st.set_page_config) ────────────────────────────────
+def load_api_keys():
+    """Load API keys from Streamlit secrets or environment variables."""
+    try:
+        # Try Streamlit secrets first (for Streamlit Cloud)
+        dg_key = st.secrets.get("DEEPGRAM_API_KEY", "")
+        groq_key = st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        # Fallback to environment variables (for local development)
+        from dotenv import load_dotenv
+        load_dotenv()
+        dg_key = os.getenv("DEEPGRAM_API_KEY", "")
+        groq_key = os.getenv("GROQ_API_KEY", "")
+    
+    return str(dg_key).strip(), str(groq_key).strip()
 
+DG_API_KEY, GROQ_API_KEY = load_api_keys()
+
+# Validate API keys
 if not DG_API_KEY:
-    st.error("❌ Missing `DEEPGRAM_API_KEY` in secrets.toml or .env file.")
+    st.error("❌ Missing `DEEPGRAM_API_KEY` in secrets.toml or Streamlit Cloud Secrets.")
     st.stop()
 if not GROQ_API_KEY:
-    st.error("❌ Missing `GROQ_API_KEY` in secrets.toml or .env file.")
+    st.error("❌ Missing `GROQ_API_KEY` in secrets.toml or Streamlit Cloud Secrets.")
     st.stop()
 
 # ── Deepgram voice options ────────────────────────────────────────────────────
@@ -115,14 +126,6 @@ if "recorder_turn" not in st.session_state:
     st.session_state.recorder_turn = 0
 if "processing" not in st.session_state:
     st.session_state.processing = False
-
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Talking Assistant",
-    page_icon="🎙️",
-    layout="centered",
-    initial_sidebar_state="expanded",
-)
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -386,9 +389,9 @@ if audio_bytes and not st.session_state.processing:
 
     st.session_state.chat_history.append({"role": "user", "text": transcript})
 
-    # Step 2 — Groq LLM
+    # Step 2 — Groq LLM (pass API key as parameter)
     with st.spinner("Thinking…"):
-        reply = generate_response(transcript, st.session_state.session_id)
+        reply = generate_response(transcript, st.session_state.session_id, GROQ_API_KEY)
 
     if not reply:
         reply = "Sorry, I had trouble with that. Please try again."
