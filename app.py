@@ -14,23 +14,31 @@ Run:
 import os
 import uuid
 import streamlit as st
-from dotenv import load_dotenv
 from audio_recorder_streamlit import audio_recorder
 from deepgram import DeepgramClient
 from groq_ai import generate_response, clear_history
 
-# Load environment variables
-load_dotenv()
+# ── API Key Loading (Works with Streamlit Cloud secrets OR .env) ─────────────
+try:
+    # Try Streamlit secrets first (for Streamlit Cloud)
+    DG_API_KEY = st.secrets.get("DEEPGRAM_API_KEY", "")
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
+except Exception:
+    # Fallback to environment variables (for local development)
+    from dotenv import load_dotenv
+    load_dotenv()
+    DG_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-# ── API Key Validation ────────────────────────────────────────────────────────
-DG_API_KEY = os.getenv("DEEPGRAM_API_KEY", "").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+# Strip whitespace and validate
+DG_API_KEY = str(DG_API_KEY).strip()
+GROQ_API_KEY = str(GROQ_API_KEY).strip()
 
 if not DG_API_KEY:
-    st.error("❌ Missing `DEEPGRAM_API_KEY` in environment variables or `.env` file.")
+    st.error("❌ Missing `DEEPGRAM_API_KEY` in secrets.toml or .env file.")
     st.stop()
 if not GROQ_API_KEY:
-    st.error("❌ Missing `GROQ_API_KEY` in environment variables or `.env` file.")
+    st.error("❌ Missing `GROQ_API_KEY` in secrets.toml or .env file.")
     st.stop()
 
 # ── Deepgram voice options ────────────────────────────────────────────────────
