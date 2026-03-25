@@ -16,7 +16,7 @@ import uuid
 import streamlit as st
 from dotenv import load_dotenv
 from audio_recorder_streamlit import audio_recorder
-from deepgram import DeepgramClient, DeepgramApiError
+from deepgram import DeepgramClient
 from groq_ai import generate_response, clear_history
 
 # Load environment variables
@@ -55,7 +55,6 @@ def stt(audio_bytes: bytes) -> str:
     """audio bytes → transcript via Deepgram nova-3"""
     try:
         deepgram = DeepgramClient(api_key=DG_API_KEY)
-        # ✅ Correct SDK usage: pass options dict with 'buffer' key
         response = deepgram.listen.v1.transcribe.transcribe_file(
             {"buffer": audio_bytes},
             {
@@ -65,9 +64,6 @@ def stt(audio_bytes: bytes) -> str:
             }
         )
         return response.results.channels[0].alternatives[0].transcript.strip()
-    except DeepgramApiError as e:
-        st.error(f"🔇 STT API Error: {e}")
-        return ""
     except Exception as e:
         st.error(f"🔇 STT Error: {type(e).__name__} — {e}")
         return ""
@@ -78,7 +74,6 @@ def TTS(text: str, voice_model: str) -> str:
     output_wav = f"output_{uuid.uuid4().hex[:8]}.wav"
     try:
         deepgram = DeepgramClient(api_key=DG_API_KEY)
-        # ✅ Correct SDK usage for TTS
         response = deepgram.speak.v1.speak.request(
             {"text": text},
             {
@@ -87,7 +82,6 @@ def TTS(text: str, voice_model: str) -> str:
                 "container": "wav"
             }
         )
-        # Handle streaming response
         with open(output_wav, "wb") as f:
             for chunk in response.stream:
                 f.write(chunk)
@@ -97,9 +91,6 @@ def TTS(text: str, voice_model: str) -> str:
         else:
             st.error("🔊 Audio file was not created or is empty.")
             return ""
-    except DeepgramApiError as e:
-        st.error(f"🔊 TTS API Error: {e}")
-        return ""
     except Exception as e:
         st.error(f"🔊 TTS Error: {type(e).__name__} — {e}")
         import traceback
@@ -142,7 +133,6 @@ html, body, [class*="css"] {
     padding-bottom: 7rem;
 }
 
-/* ── Header ── */
 .va-header {
     text-align: center;
     padding: 1.8rem 0 1rem;
@@ -175,7 +165,6 @@ html, body, [class*="css"] {
     margin: 1.2rem 0 1.6rem;
 }
 
-/* ── Chat bubbles ── */
 .brow { display: flex; margin-bottom: 0.9rem; align-items: flex-end; gap: 10px; }
 .brow.user  { flex-direction: row-reverse; }
 .brow.agent { flex-direction: row; }
@@ -205,14 +194,12 @@ html, body, [class*="css"] {
     border: 1px solid #2d1130;
 }
 
-/* ── Empty state ── */
 .empty-hint {
     text-align: center; color: #252d48;
     font-size: 0.82rem; font-family: 'JetBrains Mono', monospace;
     margin-top: 3.5rem; letter-spacing: 0.5px;
 }
 
-/* ── Recorder anchor ── */
 .rec-anchor {
     position: fixed; bottom: 0; left: 0; right: 0;
     padding: 1rem 0 1.2rem;
@@ -226,7 +213,6 @@ html, body, [class*="css"] {
     letter-spacing: 1.5px; text-transform: uppercase;
 }
 
-/* Groq badge */
 .groq-badge {
     display: inline-flex; align-items: center; gap: 5px;
     background: rgba(249,115,22,.1); color: #fb923c;
@@ -242,13 +228,11 @@ html, body, [class*="css"] {
     font-family: 'JetBrains Mono', monospace; font-size: 0.65rem;
 }
 
-/* audio player */
 audio {
     width: 100%; height: 34px; margin-top: 8px; border-radius: 8px;
     filter: invert(0.9) sepia(0.4) hue-rotate(290deg);
 }
 
-/* Microphone/recorder button fixes */
 [data-testid="stAudioRecorder"] > div > button * {
     background-color: transparent !important;
     color: #f97316 !important;
@@ -271,7 +255,6 @@ audio {
     color: #f97316 !important;
 }
 
-/* sidebar */
 section[data-testid="stSidebar"] {
     background: #0d0f18;
     border-right: 1px solid #14192b;
@@ -360,7 +343,6 @@ for turn in st.session_state.chat_history:
             st.audio(f.read(), format="audio/wav")
 
 # ── Recorder (pinned bottom) ──────────────────────────────────────────────────
-# KEY FIX: use a turn-based key so the widget fully resets after each recording.
 recorder_key = f"recorder_{st.session_state.recorder_turn}"
 
 st.markdown('<div class="rec-anchor">', unsafe_allow_html=True)
@@ -413,7 +395,6 @@ if audio_bytes and not st.session_state.processing:
         "audio_file": wav_file,
     })
 
-    # KEY FIX: bump the turn counter BEFORE rerun so the recorder key changes
     st.session_state.recorder_turn += 1
     st.session_state.processing = False
     st.rerun()
