@@ -15,7 +15,7 @@ import os
 import uuid
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
-from deepgram import DeepgramClient
+from deepgram import DeepgramClient, PrerecordedOptions, SpeakOptions
 from groq_ai import generate_response, clear_history
 
 # ── Page config (MUST be first Streamlit command) ─────────────────────────────
@@ -30,21 +30,17 @@ st.set_page_config(
 def load_api_keys():
     """Load API keys from Streamlit secrets or environment variables."""
     try:
-        # Try Streamlit secrets first (for Streamlit Cloud)
-        dg_key = st.secrets.get("DEEPGRAM_API_KEY", "")
+        dg_key   = st.secrets.get("DEEPGRAM_API_KEY", "")
         groq_key = st.secrets.get("GROQ_API_KEY", "")
     except Exception:
-        # Fallback to environment variables (for local development)
         from dotenv import load_dotenv
         load_dotenv()
-        dg_key = os.getenv("DEEPGRAM_API_KEY", "")
+        dg_key   = os.getenv("DEEPGRAM_API_KEY", "")
         groq_key = os.getenv("GROQ_API_KEY", "")
-    
     return str(dg_key).strip(), str(groq_key).strip()
 
 DG_API_KEY, GROQ_API_KEY = load_api_keys()
 
-# Validate API keys
 if not DG_API_KEY:
     st.error("❌ Missing `DEEPGRAM_API_KEY` in secrets.toml or Streamlit Cloud Secrets.")
     st.stop()
@@ -71,45 +67,57 @@ VOICES = {
 # ── Deepgram helpers ──────────────────────────────────────────────────────────
 
 def stt(audio_bytes: bytes) -> str:
-    """audio bytes → transcript via Deepgram nova-3"""
+    """audio bytes → transcript via Deepgram nova-3 (SDK v3+)"""
     try:
         deepgram = DeepgramClient(api_key=DG_API_KEY)
-        response = deepgram.listen.v1.transcribe.transcribe_file(
-            {"buffer": audio_bytes},
-            {
-                "model": "nova-3",
-                "smart_format": True,
-                "punctuate": True,
-            }
+
+        # SDK v3+: use prerecorded namespace
+        payload = {"buffer": audio_bytes}
+
+        options = PrerecordedOptions(
+            model="nova-3",
+            smart_format=True,
+            punctuate=True,
         )
-        return response.results.channels[0].alternatives[0].transcript.strip()
+
+        response = deepgram.listen.prerecorded.v("1").transcribe_file(
+            payload, options
+        )
+
+        transcript = response.results.channels[0].alternatives[0].transcript.strip()
+        return transcript
+
     except Exception as e:
         st.error(f"🔇 STT Error: {type(e).__name__} — {e}")
+        import traceback
+        st.code(traceback.format_exc())
         return ""
 
 
-def TTS(text: str, voice_model: str) -> str:
-    """text → wav file via Deepgram aura-2, returns unique filename"""
+def tts(text: str, voice_model: str) -> str:
+    """text → wav file via Deepgram aura-2 (SDK v3+), returns unique filename"""
     output_wav = f"output_{uuid.uuid4().hex[:8]}.wav"
     try:
         deepgram = DeepgramClient(api_key=DG_API_KEY)
-        response = deepgram.speak.v1.speak.request(
-            {"text": text},
-            {
-                "model": voice_model,
-                "encoding": "linear16",
-                "container": "wav"
-            }
+
+        options = SpeakOptions(
+            model=voice_model,
+            encoding="linear16",
+            container="wav",
         )
-        with open(output_wav, "wb") as f:
-            for chunk in response.stream:
-                f.write(chunk)
+
+        response = deepgram.speak.v("1").save(
+            output_wav,
+            {"text": text},
+            options,
+        )
 
         if os.path.exists(output_wav) and os.path.getsize(output_wav) > 0:
             return output_wav
         else:
             st.error("🔊 Audio file was not created or is empty.")
             return ""
+
     except Exception as e:
         st.error(f"🔊 TTS Error: {type(e).__name__} — {e}")
         import traceback
@@ -126,11 +134,13 @@ if "recorder_turn" not in st.session_state:
     st.session_state.recorder_turn = 0
 if "processing" not in st.session_state:
     st.session_state.processing = False
+if "last_audio_size" not in st.session_state:
+    st.session_state.last_audio_size = 0
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Clash+Display:wght@700&family=Fraunces:ital,wght@0,900;1,700&family=DM+Sans:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Fraunces:ital,wght@0,900;1,700&family=DM+Sans:wght@400;500&display=swap');
 
 html, body, [class*="css"] {
     font-family: 'DM Sans', sans-serif;
@@ -244,28 +254,6 @@ audio {
     filter: invert(0.9) sepia(0.4) hue-rotate(290deg);
 }
 
-[data-testid="stAudioRecorder"] > div > button * {
-    background-color: transparent !important;
-    color: #f97316 !important;
-}
-[data-testid="stAudioRecorder"] button,
-[data-testid="stAudioRecorder"] > div > button {
-    background-color: #1a2540 !important;
-    border-color: #2a3550 !important;
-    color: #f97316 !important;
-}
-[data-testid="stAudioRecorder"] button:hover,
-[data-testid="stAudioRecorder"] > div > button:hover {
-    background-color: #2a3550 !important;
-    border-color: #3a4560 !important;
-    color: #fb923c !important;
-}
-[data-testid="stAudioRecorder"] button svg,
-[data-testid="stAudioRecorder"] div button svg {
-    fill: #f97316 !important;
-    color: #f97316 !important;
-}
-
 section[data-testid="stSidebar"] {
     background: #0d0f18;
     border-right: 1px solid #14192b;
@@ -308,6 +296,7 @@ with st.sidebar:
         clear_history(st.session_state.session_id)
         st.session_state.session_id = str(uuid.uuid4())
         st.session_state.recorder_turn = 0
+        st.session_state.last_audio_size = 0
         st.rerun()
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -374,7 +363,16 @@ st.markdown(f'<div class="rec-hint">{hint}</div>', unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ── Process new recording ─────────────────────────────────────────────────────
-if audio_bytes and not st.session_state.processing:
+# Guard: only process if audio is new (different size) and large enough to be real speech
+MIN_AUDIO_BYTES = 1000  # ignore tiny/empty buffers
+
+if (
+    audio_bytes
+    and not st.session_state.processing
+    and len(audio_bytes) > MIN_AUDIO_BYTES
+    and len(audio_bytes) != st.session_state.last_audio_size
+):
+    st.session_state.last_audio_size = len(audio_bytes)
     st.session_state.processing = True
 
     # Step 1 — STT
@@ -389,7 +387,7 @@ if audio_bytes and not st.session_state.processing:
 
     st.session_state.chat_history.append({"role": "user", "text": transcript})
 
-    # Step 2 — Groq LLM (pass API key as parameter)
+    # Step 2 — Groq LLM
     with st.spinner("Thinking…"):
         reply = generate_response(transcript, st.session_state.session_id, GROQ_API_KEY)
 
@@ -398,7 +396,7 @@ if audio_bytes and not st.session_state.processing:
 
     # Step 3 — TTS
     with st.spinner("Speaking…"):
-        wav_file = TTS(reply, voice_model)
+        wav_file = tts(reply, voice_model)
 
     st.session_state.chat_history.append({
         "role":       "agent",
