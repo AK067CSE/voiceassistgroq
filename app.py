@@ -2,9 +2,9 @@
 app.py  —  Voice Chat  (Streamlit + Deepgram STT/TTS + Groq)
 ─────────────────────────────────────────────────────────────
 Flow per turn:
-  1. User records audio  →  Deepgram STT (nova-3)   →  transcript
-  2. Transcript          →  Groq llama3-70b-8192     →  reply text
-  3. Reply text          →  Deepgram TTS (aura-2)    →  wav audio
+  1. User records audio  →  Deepgram STT (nova-3)         →  transcript
+  2. Transcript          →  Groq llama-3.1-8b-instant     →  reply text
+  3. Reply text          →  Deepgram TTS (aura-2)         →  wav audio
   4. Play audio + show chat bubbles
 
 Run:
@@ -13,17 +13,25 @@ Run:
 
 import os
 import uuid
-
 import streamlit as st
 from dotenv import load_dotenv
 from audio_recorder_streamlit import audio_recorder
-
-from deepgram import DeepgramClient
+from deepgram import DeepgramClient, DeepgramApiError
 from groq_ai import generate_response, clear_history
 
+# Load environment variables
 load_dotenv()
 
-DG_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+# ── API Key Validation ────────────────────────────────────────────────────────
+DG_API_KEY = os.getenv("DEEPGRAM_API_KEY", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+
+if not DG_API_KEY:
+    st.error("❌ Missing `DEEPGRAM_API_KEY` in environment variables or `.env` file.")
+    st.stop()
+if not GROQ_API_KEY:
+    st.error("❌ Missing `GROQ_API_KEY` in environment variables or `.env` file.")
+    st.stop()
 
 # ── Deepgram voice options ────────────────────────────────────────────────────
 VOICES = {
@@ -45,69 +53,68 @@ VOICES = {
 
 def stt(audio_bytes: bytes) -> str:
     """audio bytes → transcript via Deepgram nova-3"""
-    deepgram = DeepgramClient(api_key=DG_API_KEY)
-    response = deepgram.listen.v1.media.transcribe_file(
-        request=audio_bytes,
-        model="nova-3",
-        smart_format=True,
-        punctuate=True,
-    )
     try:
+        deepgram = DeepgramClient(api_key=DG_API_KEY)
+        # ✅ Correct SDK usage: pass options dict with 'buffer' key
+        response = deepgram.listen.v1.transcribe.transcribe_file(
+            {"buffer": audio_bytes},
+            {
+                "model": "nova-3",
+                "smart_format": True,
+                "punctuate": True,
+            }
+        )
         return response.results.channels[0].alternatives[0].transcript.strip()
-    except Exception:
+    except DeepgramApiError as e:
+        st.error(f"🔇 STT API Error: {e}")
+        return ""
+    except Exception as e:
+        st.error(f"🔇 STT Error: {type(e).__name__} — {e}")
         return ""
 
 
 def TTS(text: str, voice_model: str) -> str:
     """text → wav file via Deepgram aura-2, returns unique filename"""
-    # Use a unique filename each time so audio files never overwrite each other
     output_wav = f"output_{uuid.uuid4().hex[:8]}.wav"
     try:
         deepgram = DeepgramClient(api_key=DG_API_KEY)
-        response = deepgram.speak.v1.audio.generate(
-            text=text,
-            model=voice_model,
-            encoding="linear16",
-            container="wav"
+        # ✅ Correct SDK usage for TTS
+        response = deepgram.speak.v1.speak.request(
+            {"text": text},
+            {
+                "model": voice_model,
+                "encoding": "linear16",
+                "container": "wav"
+            }
         )
-
-        with open(output_wav, "wb") as audio_file:
-            if hasattr(response, "stream"):
-                if hasattr(response.stream, "getvalue"):
-                    audio_data = response.stream.getvalue()
-                elif hasattr(response.stream, "read"):
-                    audio_data = response.stream.read()
-                else:
-                    audio_data = response.stream
-                audio_file.write(audio_data)
-            elif isinstance(response, (bytes, bytearray)):
-                audio_file.write(response)
-            else:
-                audio_data = b"".join(chunk for chunk in response if chunk)
-                audio_file.write(audio_data)
+        # Handle streaming response
+        with open(output_wav, "wb") as f:
+            for chunk in response.stream:
+                f.write(chunk)
 
         if os.path.exists(output_wav) and os.path.getsize(output_wav) > 0:
             return output_wav
         else:
-            st.error("Audio file was not created or is empty.")
+            st.error("🔊 Audio file was not created or is empty.")
             return ""
-
+    except DeepgramApiError as e:
+        st.error(f"🔊 TTS API Error: {e}")
+        return ""
     except Exception as e:
-        st.error(f"TTS error: {e}")
+        st.error(f"🔊 TTS Error: {type(e).__name__} — {e}")
         import traceback
         st.code(traceback.format_exc())
         return ""
 
 
 # ── Session state ─────────────────────────────────────────────────────────────
-if "session_id"      not in st.session_state:
+if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
-if "chat_history"    not in st.session_state:
+if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-# KEY FIX: a counter that increments after every turn to reset the recorder widget
-if "recorder_turn"   not in st.session_state:
+if "recorder_turn" not in st.session_state:
     st.session_state.recorder_turn = 0
-if "processing"      not in st.session_state:
+if "processing" not in st.session_state:
     st.session_state.processing = False
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -293,7 +300,7 @@ with st.sidebar:
         <div style='font-family:JetBrains Mono,monospace;font-size:0.68rem;
                     color:#3a4570;line-height:2.2;'>
         STT &nbsp;&nbsp;nova-3<br>
-        LLM &nbsp;&nbsp;llama3-70b<br>
+        LLM &nbsp;&nbsp;llama-3.1-8b-instant<br>
         TTS &nbsp;&nbsp;aura-2<br>
         Voice &nbsp;{voice_model}
         </div>
@@ -320,7 +327,7 @@ st.markdown("""
 
 col1, col2, col3 = st.columns([1, 1, 1])
 with col1:
-    st.markdown('<div class="groq-badge">⚡ Groq llama3-70b</div>', unsafe_allow_html=True)
+    st.markdown('<div class="groq-badge">⚡ Groq llama-3.1-8b-instant</div>', unsafe_allow_html=True)
 with col2:
     st.markdown('<div class="dg-badge">🎤 Deepgram nova-3</div>', unsafe_allow_html=True)
 with col3:
@@ -354,8 +361,6 @@ for turn in st.session_state.chat_history:
 
 # ── Recorder (pinned bottom) ──────────────────────────────────────────────────
 # KEY FIX: use a turn-based key so the widget fully resets after each recording.
-# When the key changes, Streamlit treats it as a brand-new component → returns None
-# → user must press mic again for the next turn. No stale bytes, no stuck state.
 recorder_key = f"recorder_{st.session_state.recorder_turn}"
 
 st.markdown('<div class="rec-anchor">', unsafe_allow_html=True)
@@ -386,7 +391,6 @@ if audio_bytes and not st.session_state.processing:
     if not transcript:
         st.warning("Couldn't catch that — please try again.")
         st.session_state.processing = False
-        # Bump key so the recorder resets even on failure
         st.session_state.recorder_turn += 1
         st.rerun()
 
@@ -410,7 +414,6 @@ if audio_bytes and not st.session_state.processing:
     })
 
     # KEY FIX: bump the turn counter BEFORE rerun so the recorder key changes
-    # and Streamlit mounts a fresh component → ready for next voice input immediately
     st.session_state.recorder_turn += 1
     st.session_state.processing = False
     st.rerun()
