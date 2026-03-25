@@ -2,18 +2,26 @@
 groq_ai.py
 ──────────
 Groq LLM — generates conversational responses using llama-3.1-8b-instant.
-Keeps a running message history so the conversation has memory.
 """
 import os
-from groq import Groq, GroqError
-from dotenv import load_dotenv
+from groq import Groq
 
-load_dotenv()
+# ── API Key Loading (Works with Streamlit Cloud secrets OR .env) ─────────────
+try:
+    import streamlit as st
+    # Try Streamlit secrets first (for Streamlit Cloud)
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
+except Exception:
+    # Fallback to environment variables (for local development)
+    from dotenv import load_dotenv
+    load_dotenv()
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-# ── API Key Validation ────────────────────────────────────────────────────────
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+# Strip whitespace and validate
+GROQ_API_KEY = str(GROQ_API_KEY).strip()
+
 if not GROQ_API_KEY:
-    raise ValueError("❌ GROQ_API_KEY not found in environment variables or .env file")
+    raise ValueError("❌ GROQ_API_KEY not found in secrets.toml or .env file")
 
 _client = Groq(api_key=GROQ_API_KEY)
 _history: dict[str, list] = {}
@@ -28,15 +36,10 @@ Rules:
 - Sound warm and human, not robotic
 """
 
-# ✅ Model name — confirmed
 MODEL_NAME = "llama-3.1-8b-instant"
 
 
 def generate_response(prompt: str, session_id: str = "default") -> str:
-    """
-    Send prompt to Groq (llama-3.1-8b-instant) and return the text reply.
-    Maintains conversation history per session_id.
-    """
     if session_id not in _history:
         _history[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -44,7 +47,7 @@ def generate_response(prompt: str, session_id: str = "default") -> str:
 
     try:
         completion = _client.chat.completions.create(
-            model=MODEL_NAME,  # ✅ Uses llama-3.1-8b-instant
+            model=MODEL_NAME,
             messages=_history[session_id],
             temperature=1,
             max_tokens=1024,
@@ -57,14 +60,10 @@ def generate_response(prompt: str, session_id: str = "default") -> str:
                 response += chunk.choices[0].delta.content
         _history[session_id].append({"role": "assistant", "content": response})
         return response.strip()
-    except GroqError as e:
-        print(f"❌ Groq API Error: {e}")
-        return ""
     except Exception as e:
         print(f"❌ Groq Error: {type(e).__name__} — {e}")
         return ""
 
 
 def clear_history(session_id: str = "default"):
-    """Wipe conversation memory for a session."""
     _history.pop(session_id, None)
