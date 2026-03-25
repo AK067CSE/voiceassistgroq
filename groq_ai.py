@@ -46,12 +46,16 @@ def generate_response(prompt: str, session_id: str, api_key: str) -> str:
             top_p=1,
             stream=True,
         )
+
         response = ""
         for chunk in completion:
-            if chunk.choices[0].delta.content:
-                response += chunk.choices[0].delta.content
+            delta = chunk.choices[0].delta.content
+            if delta:
+                response += delta
+
         _history[session_id].append({"role": "assistant", "content": response})
         return response.strip()
+
     except Exception as e:
         print(f"❌ Groq Error: {type(e).__name__} — {e}")
         return ""
