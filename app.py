@@ -15,8 +15,17 @@ import os
 import uuid
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
-from deepgram import DeepgramClient, PrerecordedOptions, SpeakOptions
+from deepgram import DeepgramClient, PrerecordedOptions, SpeakOptions  # noqa: F401
 from groq_ai import generate_response, clear_history
+
+# ── Resolve correct SpeakOptions class across SDK versions ───────────────────
+try:
+    from deepgram import SpeakOptions as _SpeakOpts  # SDK v3.2–3.x
+except ImportError:
+    try:
+        from deepgram import SpeakRESTOptions as _SpeakOpts  # SDK v3.3+
+    except ImportError:
+        _SpeakOpts = None  # fallback: pass dict directly
 
 # ── Page config (MUST be first Streamlit command) ─────────────────────────────
 st.set_page_config(
@@ -67,22 +76,21 @@ VOICES = {
 # ── Deepgram helpers ──────────────────────────────────────────────────────────
 
 def stt(audio_bytes: bytes) -> str:
-    """audio bytes → transcript via Deepgram nova-3 (SDK v3+)"""
+    """audio bytes → transcript via Deepgram nova-3 (SDK v3 compatible)"""
     try:
         deepgram = DeepgramClient(api_key=DG_API_KEY)
-
-        # SDK v3+: use prerecorded namespace
         payload = {"buffer": audio_bytes}
-
         options = PrerecordedOptions(
             model="nova-3",
             smart_format=True,
             punctuate=True,
         )
 
-        response = deepgram.listen.prerecorded.v("1").transcribe_file(
-            payload, options
-        )
+        # Try newer 'listen.rest' path first (SDK v3.3+), fall back to 'listen.prerecorded'
+        try:
+            response = deepgram.listen.rest.v("1").transcribe_file(payload, options)
+        except AttributeError:
+            response = deepgram.listen.prerecorded.v("1").transcribe_file(payload, options)
 
         transcript = response.results.channels[0].alternatives[0].transcript.strip()
         return transcript
@@ -95,22 +103,21 @@ def stt(audio_bytes: bytes) -> str:
 
 
 def tts(text: str, voice_model: str) -> str:
-    """text → wav file via Deepgram aura-2 (SDK v3+), returns unique filename"""
+    """text → wav file via Deepgram aura-2 (SDK v3 compatible), returns unique filename"""
     output_wav = f"output_{uuid.uuid4().hex[:8]}.wav"
     try:
         deepgram = DeepgramClient(api_key=DG_API_KEY)
 
-        options = SpeakOptions(
-            model=voice_model,
-            encoding="linear16",
-            container="wav",
-        )
+        speak_payload = {"text": text}
+        speak_options = {"model": voice_model, "encoding": "linear16", "container": "wav"}
 
-        response = deepgram.speak.v("1").save(
-            output_wav,
-            {"text": text},
-            options,
-        )
+        # Build options object if available, else pass raw dict
+        if _SpeakOpts is not None:
+            opts_obj = _SpeakOpts(**speak_options)
+        else:
+            opts_obj = speak_options
+
+        response = deepgram.speak.v("1").save(output_wav, speak_payload, opts_obj)
 
         if os.path.exists(output_wav) and os.path.getsize(output_wav) > 0:
             return output_wav
